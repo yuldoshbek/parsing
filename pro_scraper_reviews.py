@@ -10,7 +10,7 @@ Playwright + Stealth + Page.Request (браузерная сессия) + PRO-В
   3. page.request.get() — API-запросы через браузерную сессию (cookies + referer = легитимный AJAX)
   4. Пагинация 365 дней — skip/take цикл, стоп по дате
   5. PRO-Воронка — 100% негатив + умный фильтр позитива (17 слов + стоп-фразы)
-  6. SKU De-gluing — разбивка по color из API-ответа
+  6. SKU De-gluing — разбивка по nmId (надёжнее color: WB часто оставляет color='')
   7. 3 формата: TXT (LLM), JSON (IT), CSV (Excel)
 
 Запуск:
@@ -324,9 +324,14 @@ def safe_goto(page: Page, url: str, timeout: int = 60_000) -> bool:
 # ══════════════════════════════════════════════════════════════════════════════
 def get_product_info(page: Page, nm_id: int) -> dict:
     """
-    Запрашивает brand, name, total_wb, root (imtId).
+    Запрашивает brand, name, total_wb, root (imtId), nm_color.
     Использует page.evaluate(fetch) — запрос идёт ИЗНУТРИ браузера,
     с его cookies и origin. Это не блокируется card.wb.ru.
+
+    Возвращаемые поля:
+      total_wb_nm  — feedbacks именно этого nmId (не всей склейки!)
+      nm_color     — цвет/вариант этого nmId из card API (например "Оранжевый")
+      root         — imtId склейки (нужен для feedbacks API)
     """
     url = (
         f"https://card.wb.ru/cards/v4/detail"
@@ -351,11 +356,11 @@ def get_product_info(page: Page, nm_id: int) -> dict:
         """, url)
     except Exception as e:
         log.error(f"  [product_info] ошибка evaluate: {e!r}")
-        return {"brand": "", "name": "", "total_wb": 0, "root": nm_id}
+        return {"brand": "", "name": "", "total_wb_nm": 0, "root": nm_id, "nm_color": ""}
 
     if not data or data.get("_error"):
         log.error(f"  [product_info] ошибка: {data}")
-        return {"brand": "", "name": "", "total_wb": 0, "root": nm_id}
+        return {"brand": "", "name": "", "total_wb_nm": 0, "root": nm_id, "nm_color": ""}
 
     products = (
         (data.get("data") or {}).get("products")
@@ -363,11 +368,17 @@ def get_product_info(page: Page, nm_id: int) -> dict:
         or []
     )
     p = products[0] if products else {}
+
+    # Цвет конкретного nmId — WB отдаёт в colors[0].name
+    colors   = p.get("colors") or []
+    nm_color = colors[0].get("name", "").strip() if colors else ""
+
     return {
-        "brand":    p.get("brand", ""),
-        "name":     p.get("name",  ""),
-        "total_wb": int(p.get("feedbacks", 0) or p.get("feedbackCount", 0) or 0),
-        "root":     int(p.get("root", 0) or nm_id),
+        "brand":      p.get("brand", ""),
+        "name":       p.get("name",  ""),
+        "total_wb_nm": int(p.get("feedbacks", 0) or p.get("nmFeedbacks", 0) or 0),
+        "root":       int(p.get("root", 0) or nm_id),
+        "nm_color":   nm_color,   # цвет этого nmId (Оранжевый / FDM / ...)
     }
 
 
@@ -460,6 +471,7 @@ def normalize_review(fb: dict) -> dict:
     text   = (fb.get("text")  or "").strip()
     answer = ((fb.get("answer") or {}).get("text") or "").strip()
     color  = (fb.get("color") or "").strip()
+    nm_id  = fb.get("nmId") or 0   # nmId конкретного варианта этого отзыва
     rating = int(fb.get("productValuation", 0))
 
     full_text = " ".join(filter(None, [pros, cons, text]))
@@ -470,7 +482,8 @@ def normalize_review(fb: dict) -> dict:
         "date_raw":      fb.get("createdDate", ""),
         "rating":        rating,
         "rating_group":  ("позитив" if rating >= 4 else ("нейтрал" if rating == 3 else "негатив")),
-        "sku_variant":   color,
+        "sku_variant":   color,   # raw color из API (может быть пустым)
+        "nm_id":         nm_id,   # nmId варианта — надёжнее color для расклейки
         "pros":          pros,
         "cons":          cons,
         "text":          text,
@@ -483,10 +496,14 @@ def normalize_review(fb: dict) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 #  ВОРОНКА — СТАТИСТИКА
 # ══════════════════════════════════════════════════════════════════════════════
-def build_funnel_stats(raw: list[dict], filtered: list[dict], total_wb: int) -> dict:
+def build_funnel_stats(raw: list[dict], filtered: list[dict],
+                       total_wb_nm: int, total_wb_root: int = 0) -> dict:
     """
     Строит двухуровневую воронку:
-      total_wb → total_parsed → no_text → working_base → after_filter (PRO)
+      total_wb_nm → total_parsed → no_text → working_base → after_filter (PRO)
+
+    total_wb_nm  — feedbacks конкретного nmId (из card.wb.ru). Точный знаменатель.
+    total_wb_root — feedbackCount всей склейки (из feedbacks API). Для справки.
 
     % сентимента считаются от after_filter — финальной рабочей базы.
     sum_pct_check = 100.0 ± 0.2 — самопроверка.
@@ -508,7 +525,8 @@ def build_funnel_stats(raw: list[dict], filtered: list[dict], total_wb: int) -> 
 
     return {
         "funnel": {
-            "total_wb":        total_wb,
+            "total_wb_nm":     total_wb_nm,    # оценок у этого nmId (per-SKU)
+            "total_wb_root":   total_wb_root,  # оценок у всей склейки (справочно)
             "total_parsed":    total_parsed,
             "no_text":         no_text,
             "working_base":    working_base,
@@ -526,6 +544,8 @@ def build_funnel_stats(raw: list[dict], filtered: list[dict], total_wb: int) -> 
             "sum_pct_check":  round(pct(positive, text_base) + pct(neutral, text_base) + pct(negative, text_base), 1),
         },
         "_note": (
+            "total_wb_nm = оценок у этого nmId на WB (из card API). "
+            "total_wb_root = оценок всей склейки (из feedbacks API, справочно). "
             "working_base = отзывы с текстом до воронки. "
             "after_filter = прошли PRO-воронку (знаменатель для %). "
             "sum_pct_check должен быть = 100.0 ± 0.2."
@@ -549,11 +569,12 @@ def to_txt_llm(product_id: str, brand: str, name: str, sku: str,
         SEP,
         "",
         "── ВОРОНКА ──────────────────────────────────────────────────────────",
-        f"  Всего на WB:      {f.get('total_wb', '?')}",
-        f"  Спарсено (год):   {f.get('total_parsed', 0)}",
-        f"  Без текста:       {f.get('no_text', 0)}",
-        f"  Рабочая база:     {f.get('working_base', 0)}",
-        f"  После PRO-фильтра:{f.get('after_filter', 0)}  (отсеяно {f.get('filter_rate_pct', 0)}%)",
+        f"  Оценок этого SKU на WB: {f.get('total_wb_nm', '?')}  (feedbacks этого nmId)",
+        f"  Оценок всей склейки:    {f.get('total_wb_root', '?')}  (feedbackCount root, справочно)",
+        f"  Спарсено (год):         {f.get('total_parsed', 0)}",
+        f"  Без текста:             {f.get('no_text', 0)}",
+        f"  Рабочая база:           {f.get('working_base', 0)}",
+        f"  После PRO-фильтра:      {f.get('after_filter', 0)}  (отсеяно {f.get('filter_rate_pct', 0)}%)",
         "",
         f"── СЕНТИМЕНТ (% от {f.get('text_base', 0)} отзывов с текстом) ─────────────────────",
         f"  Позитив (4-5★): {s.get('positive_count', 0)} отз.  = {s.get('positive_pct', 0)}%",
@@ -587,7 +608,7 @@ def to_txt_llm(product_id: str, brand: str, name: str, sku: str,
 # ══════════════════════════════════════════════════════════════════════════════
 CSV_FIELDS = [
     "product_id", "brand", "name", "sku_variant",
-    "total_wb", "total_parsed", "no_text", "working_base", "after_filter", "text_base",
+    "total_wb_nm", "total_wb_root", "total_parsed", "no_text", "working_base", "after_filter", "text_base",
     "positive_pct", "neutral_pct", "negative_pct", "sum_pct_check",
     "date", "rating", "rating_group", "word_count",
     "pros", "cons", "text", "seller_answer",
@@ -606,28 +627,29 @@ def reviews_to_csv_rows(product_id: str, brand: str, name: str,
     rows = []
     for r in reviews:
         rows.append({
-            "product_id":    product_id,
-            "brand":         brand,
-            "name":          name,
-            "sku_variant":   r.get("sku_variant", ""),
-            "total_wb":      f.get("total_wb", ""),
-            "total_parsed":  f.get("total_parsed", ""),
-            "no_text":       f.get("no_text", ""),
-            "working_base":  f.get("working_base", ""),
-            "after_filter":  f.get("after_filter", ""),
-            "text_base":     f.get("text_base", ""),
-            "positive_pct":  s.get("positive_pct", ""),
-            "neutral_pct":   s.get("neutral_pct", ""),
-            "negative_pct":  s.get("negative_pct", ""),
-            "sum_pct_check": s.get("sum_pct_check", ""),
-            "date":          r.get("date", ""),
-            "rating":        r.get("rating", ""),
-            "rating_group":  r.get("rating_group", ""),
-            "word_count":    r.get("word_count", ""),
-            "pros":          _clean_cell(r.get("pros", "")),
-            "cons":          _clean_cell(r.get("cons", "")),
-            "text":          _clean_cell(r.get("text", "")),
-            "seller_answer": _clean_cell(r.get("seller_answer", "")),
+            "product_id":     product_id,
+            "brand":          brand,
+            "name":           name,
+            "sku_variant":    r.get("sku_variant", ""),
+            "total_wb_nm":    f.get("total_wb_nm", ""),    # per-nmId (точный)
+            "total_wb_root":  f.get("total_wb_root", ""),  # вся склейка (справочно)
+            "total_parsed":   f.get("total_parsed", ""),
+            "no_text":        f.get("no_text", ""),
+            "working_base":   f.get("working_base", ""),
+            "after_filter":   f.get("after_filter", ""),
+            "text_base":      f.get("text_base", ""),
+            "positive_pct":   s.get("positive_pct", ""),
+            "neutral_pct":    s.get("neutral_pct", ""),
+            "negative_pct":   s.get("negative_pct", ""),
+            "sum_pct_check":  s.get("sum_pct_check", ""),
+            "date":           r.get("date", ""),
+            "rating":         r.get("rating", ""),
+            "rating_group":   r.get("rating_group", ""),
+            "word_count":     r.get("word_count", ""),
+            "pros":           _clean_cell(r.get("pros", "")),
+            "cons":           _clean_cell(r.get("cons", "")),
+            "text":           _clean_cell(r.get("text", "")),
+            "seller_answer":  _clean_cell(r.get("seller_answer", "")),
         })
     return rows
 
@@ -748,6 +770,10 @@ def main() -> None:
             return
         rand_sleep(*DELAY_BETWEEN)
 
+        # Кэш по root: если несколько nmId из одной склейки — API запрос делаем один раз
+        # root → (all_norm: list[dict], total_wb_root: int)
+        root_cache: dict[int, tuple[list[dict], int]] = {}
+
         for idx, nm_id in enumerate(articles, 1):
             log.info("─" * 60)
             log.info(f"[{idx}/{len(articles)}]  nmId={nm_id}")
@@ -766,38 +792,101 @@ def main() -> None:
                 continue
             rand_sleep(*DELAY_PAGE)
 
-            # ── Инфо о товаре — через page.evaluate (после загрузки страницы)
-            info = get_product_info(page, nm_id)
-            root = info["root"]
+            # ── Инфо о товаре — через page.evaluate (после загрузки страницы) ──
+            info     = get_product_info(page, nm_id)
+            root     = info["root"]
+            nm_color = info["nm_color"]          # цвет этого nmId (из card API)
+            total_wb_nm = info["total_wb_nm"]    # feedbacks этого nmId
+
             log.info(f"  Товар: {info['brand']!r} — {info['name']!r}")
-            log.info(f"  nmId={nm_id}, root={root}, total_wb={info['total_wb']}")
+            log.info(f"  nmId={nm_id}, root={root}, nm_color={nm_color!r}, total_wb_nm={total_wb_nm}")
 
-            # ── Сбор отзывов с пагинацией ─────────────────────────────────
-            raw_api, api_total_wb = fetch_all_reviews(page, root, cutoff, nm_id)
-            total_wb = api_total_wb or info["total_wb"]
-            log.info(f"  Сырых за {DAYS_BACK} дней: {len(raw_api)}")
-
-            # ── Нормализация ───────────────────────────────────────────────
-            all_norm = [normalize_review(fb) for fb in raw_api]
+            # ── Сбор отзывов: дедупликация по root ────────────────────────
+            # Если несколько артикулов из одной склейки — данные уже в кэше
+            if root in root_cache:
+                all_norm, total_wb_root = root_cache[root]
+                log.info(f"  root={root} уже в кэше — повторный запрос к API пропущен")
+            else:
+                raw_api, total_wb_root = fetch_all_reviews(page, root, cutoff, nm_id)
+                log.info(f"  Сырых за {DAYS_BACK} дней: {len(raw_api)}")
+                all_norm = [normalize_review(fb) for fb in raw_api]
+                root_cache[root] = (all_norm, total_wb_root)
 
             # ── PRO-Воронка ────────────────────────────────────────────────
             filtered = [r for r in all_norm if pro_filter(r)]
             rejected = len(all_norm) - len(filtered)
             log.info(f"  PRO-воронка: {len(filtered)}/{len(all_norm)} прошли (отсеяно {rejected})")
 
-            # ── Воронка статистики ─────────────────────────────────────────
-            funnel = build_funnel_stats(all_norm, filtered, total_wb)
+            # ── Воронка статистики (сводная по root) ──────────────────────
+            funnel = build_funnel_stats(all_norm, filtered,
+                                        total_wb_nm=total_wb_nm,
+                                        total_wb_root=total_wb_root)
             log.info(f"  Воронка: {funnel['funnel']}")
             log.info(f"  Сентимент: {funnel['sentiment']}")
 
-            # ── SKU De-gluing: разбивка по цвету/варианту ─────────────────
+            # ── SKU De-gluing: разбивка по nmId (надёжнее color) ──────────
+            # nmId каждого отзыва точно указывает вариант, color — нет:
+            # WB часто оставляет color='' даже когда вариант известен.
+            #
+            # nm_color_map: nmId → display-название (из card API или color из отзыва)
+            # Запрашиваем карточки всех nmId, встреченных в отзывах
+            unique_nm_ids = {r.get("nm_id") for r in all_norm if r.get("nm_id")}
+            nm_color_map: dict[int, str] = {}
+
+            if unique_nm_ids:
+                nm_list = ";".join(str(n) for n in unique_nm_ids)
+                card_url = (
+                    f"https://card.wb.ru/cards/v4/detail"
+                    f"?appType=1&curr=rub&dest=-1257786&nm={nm_list}"
+                )
+                try:
+                    card_data = page.evaluate("""
+                        async (url) => {
+                            try {
+                                const r = await fetch(url, {
+                                    headers: {'Accept': 'application/json, text/plain, */*',
+                                              'Accept-Language': 'ru-RU,ru;q=0.9'}
+                                });
+                                if (!r.ok) return {_error: r.status};
+                                return await r.json();
+                            } catch(e) { return {_error: String(e)}; }
+                        }
+                    """, card_url)
+                    siblings = (
+                        (card_data.get("data") or {}).get("products")
+                        or card_data.get("products") or []
+                    )
+                    for sp in siblings:
+                        s_nm  = int(sp.get("id", 0))
+                        s_col = ((sp.get("colors") or [{}])[0]).get("name", "").strip()
+                        if not s_col:
+                            # fallback: берём часть названия (тип ручки) как метку
+                            s_col = sp.get("name", "")[:20].strip()
+                        if s_nm:
+                            nm_color_map[s_nm] = s_col.capitalize() if s_col else str(s_nm)
+                    log.info(f"  nmId→цвет карточки: {nm_color_map}")
+                except Exception as e:
+                    log.warning(f"  [deglue] не удалось получить карточки nmId: {e!r}")
+
+            # Для nmId без карточки — fallback: color из отзыва (capitalize) или сам nmId
+            def resolve_sku(r: dict) -> str:
+                nm = r.get("nm_id", 0)
+                if nm and nm in nm_color_map:
+                    return nm_color_map[nm]
+                raw = (r.get("sku_variant") or "").strip()
+                return raw.capitalize() if raw else (str(nm) if nm else "Неизвестно")
+
+            # Обновляем sku_variant в каждом отзыве и строим карту
             sku_map: dict[str, list[dict]] = {}
             for r in filtered:
-                raw_sku = (r.get("sku_variant") or "").strip()
-                # Нормализуем регистр: первая буква заглавная, остальные как есть
-                sku = raw_sku.capitalize() if raw_sku else "Неизвестно"
-                r["sku_variant"] = sku  # обновляем и в самом отзыве
+                sku = resolve_sku(r)
+                r["sku_variant"] = sku
                 sku_map.setdefault(sku, []).append(r)
+
+            # То же для all_norm (нужно для per-SKU воронки)
+            for r in all_norm:
+                r["sku_variant"] = resolve_sku(r)
+
             all_skus = sorted(sku_map.keys())
             log.info(f"  SKU-варианты ({len(all_skus)}): {all_skus}")
 
@@ -810,10 +899,19 @@ def main() -> None:
             )
 
             # ── Сохранение: отдельная папка на каждый SKU ─────────────────
+            # total_wb_nm: если nmId из карточки известен → его feedbacks, иначе root
+            nm_feedbacks_map: dict[str, int] = {}
+            for s_nm, s_color in nm_color_map.items():
+                # Для запрошенного nmId уже знаем total_wb_nm из card API
+                if s_nm == nm_id:
+                    nm_feedbacks_map[s_color.capitalize() if s_color else str(s_nm)] = total_wb_nm
+
             for sku, sku_reviews in sku_map.items():
-                sku_raw = [r for r in all_norm
-                           if (r.get("sku_variant") or "Неизвестно") == sku]
-                sku_funnel = build_funnel_stats(sku_raw, sku_reviews, total_wb)
+                sku_raw_all = [r for r in all_norm if r.get("sku_variant") == sku]
+                sku_total_wb_nm = nm_feedbacks_map.get(sku, total_wb_root)
+                sku_funnel = build_funnel_stats(sku_raw_all, sku_reviews,
+                                                total_wb_nm=sku_total_wb_nm,
+                                                total_wb_root=total_wb_root)
                 folder_name = f"{nm_id}_{safe_filename(sku)}"
                 save_to_dir(
                     RESULTS_DIR / folder_name,
@@ -826,8 +924,13 @@ def main() -> None:
                 reviews_to_csv_rows(str(nm_id), info["brand"], info["name"], filtered, funnel)
             )
             all_json_prods.append({
-                "product_id": str(nm_id), "brand": info["brand"], "name": info["name"],
-                "all_sku_variants": all_skus, "funnel_stats": funnel, "reviews": filtered,
+                "product_id":      str(nm_id),
+                "brand":           info["brand"],
+                "name":            info["name"],
+                "nm_color":        nm_color,
+                "all_sku_variants": all_skus,
+                "funnel_stats":    funnel,
+                "reviews":         filtered,
             })
             all_txt_blocks.append(
                 to_txt_llm(str(nm_id), info["brand"], info["name"],

@@ -1,7 +1,7 @@
 # AI Memory — Парсер отзывов WB
 
-> Последнее обновление: 16 апреля 2026  
-> Версия парсера: v5.0  
+> Последнее обновление: 16 апреля 2026 (сессия 3)
+> Версия парсера: v5.1 (pro_scraper_reviews.py)
 > Агент: Claude Sonnet 4.6
 
 ---
@@ -9,86 +9,93 @@
 ## Состояние проекта
 
 ### Что это
-API-парсер отзывов с Wildberries (без браузера).  
-Запуск: `python main.py` (читает `articles.txt`, пишет в `results/` или `$WB_RESULTS_DIR`)
+Парсер отзывов с Wildberries. Два инструмента:
+- `pro_scraper_reviews.py` — Playwright + браузер + PRO-фильтр (основной)
+- `main.py` — прямые HTTP-запросы без браузера (лёгкий режим)
+
+Запуск: `python pro_scraper_reviews.py` (читает `articles.txt`, пишет в `results_pro_reviews/`)
 
 ### GitHub
-Репозиторий: https://github.com/yuldoshbek/parsing  
-Ветка: `main`. Задеплоен 16.04.2026.
+Репозиторий: https://github.com/yuldoshbek/parsing
+Ветка: `main`.
 
 ### Структура проекта
 | Файл/папка | Роль |
 |---|---|
-| `main.py` | Основной парсер v5.0 — API-режим (requests, без браузера) |
-| `requirements.txt` | `requests>=2.31.0` |
+| `pro_scraper_reviews.py` | Основной парсер v5.1 — Playwright + PRO-воронка |
+| `main.py` | Лёгкий парсер v5.0 — API-режим без браузера |
+| `requirements.txt` | `playwright playwright-stealth requests` |
 | `articles.txt` | Список артикулов WB (gitignored — создай свой) |
 | `articles.example.txt` | Пример формата articles.txt |
 | `run.bat` | Windows-запуск с логом |
-| `README.md` | Полная документация для разработчиков и ИИ |
-| `docs/AI_ANALYST_GUIDE.md` | ТЗ для ИИ-аналитика — формат анализа отзывов |
-| `docs/AUDIT_AND_PLAN.md` | Аудит багов v1-v4 + приоритизированный план |
-| `tools/convert.py` | Разовый конвертер старых `results/*.json` → новый формат |
+| `README.md` | Документация (обновлена под v5.1) |
+| `docs/AI_ANALYST_GUIDE.md` | ТЗ для ИИ-аналитика |
+| `docs/AUDIT_AND_PLAN.md` | Аудит багов v1-v4 + план |
+| `tools/verify_browser.py` | Браузерная проверка всех отзывов Оранжевый (246290927) |
+| `tools/verify_browser_fdm.py` | Браузерная проверка всех отзывов FDM (371806956) |
+| `tools/convert.py` | Конвертер старых results/*.json |
 | `tools/debug_check.py` | Диагностика API-ответов |
-| `results/` | Директория вывода (gitignored, задаётся через `WB_RESULTS_DIR`) |
+| `FILTER_PIPELINE_EXPLAINED.txt` | Полное описание фильтрации с примерами (новый) |
+| `DEMO_before_after.txt` | До/после для презентации руководителю |
+| `ORANGE_browser_verify.txt` | 55 из 110 Оранжевый — верификация через браузер |
+| `FDM_browser_verify.txt` | 18 из 30 FDM — верификация через браузер |
 
 ### Разделение кода и данных
-Код в `C:\Users\User\Desktop\Отзывы\`.  
-Данные (`results/`) — там же по умолчанию, но можно вынести через `WB_RESULTS_DIR`.  
-В репозиторий данные **не коммитятся** (gitignored).
+Код в `C:\Users\User\Desktop\Отзывы\`.
+Данные (`results_pro_reviews/`, `results_test*/`) — gitignored, не коммитятся.
 
 ---
 
 ## История исправлений
 
-### v5.0 — Замена Playwright на API-режим (16.04.2026)
+### v5.1 — SKU De-gluing: исправлен total_wb и дедупликация (16.04.2026)
 
-**Проблема:** WB DDoS-Guard блокировал Playwright-браузер («Что-то не так... Подозрительная активность»).
+**Контекст:** Тестовый артикул `246290927` (Give Creative, 3D ручка).
+WB склеивает несколько nmId в одну страницу отзывов (root=232715088):
+- nmId 246290927 = Оранжевый, feedbacks=**110**
+- nmId 371806956 = FDM, feedbacks=**30**
+- root возвращает feedbackCount=**151** (баг счётчика WB, 110+30≠151)
 
-**Решение:** Полностью убран Playwright. Парсер теперь работает через прямые HTTP-запросы к внутреннему WB API:
-- `feedbacks2.wb.ru/feedbacks/v1/{nmId}` — отзывы
-- `questions.wb.ru/api/v1/questions?nmId={nmId}` — вопросы
-- `card.wb.ru/cards/v4/detail?nm={nmId}` — инфо о товаре
+**БАГ A — total_wb в per-SKU папках был неверным** ✅ ИСПРАВЛЕН
+- Было: `total_wb = 151` (feedbackCount склейки) в каждой per-SKU папке
+- Стало: `total_wb_nm = 110` (feedbacks nmId из card API) + `total_wb_root = 151` (справочно)
+- card.wb.ru → `p["feedbacks"]` = per-nmId; feedbacks2.wb.ru → `feedbackCount` = root
 
-**Новые функции:**
-- `make_session()` — requests.Session с ротацией UA
-- `api_get()` — robust GET с ретраями на 429/5xx
-- `_fmt_date()` — ISO 8601 → московское время (UTC+3)
-- `get_product_info()` — переписан на requests
-- `scrape_feedbacks()` — переписан на API
-- `scrape_questions()` — переписан на API
+**БАГ B — Дублирование при нескольких артикулах одной склейки** ✅ ИСПРАВЛЕН
+- Было: два nmId → два одинаковых запроса → дублированные данные
+- Стало: `root_cache: dict[int, tuple[list, int]]` — если root уже обработан, API не вызывается
 
-**Преимущества v5 vs v4:**
-- `sku_variant` — из поля `color` каждого отзыва в API (точнее browser-based определения)
-- `total_wb` — из `feedbackCount` карточки (точный счётчик WB)
-- Не нужен браузер, нет антибота
-- В 5-10 раз быстрее Playwright
+**БАГ C — Цвет nmId определялся по ненадёжному полю color** ✅ ИСПРАВЛЕН
+- Было: split по `color` — WB часто возвращает `color=''` (из 18 FDM отзывов: 12 с пустым color)
+- Стало: split по `nmId` → card API для маппинга nmId→display_name
 
-**Удалено:** все Playwright-функции (`wait_for_challenge`, `safe_goto`, `human_scroll`, `make_fresh_context`, `get_sku_variants`, все `_JS_*` константы)
-
-**Без изменений:** все экспортные функции (TXT, CSV, JSON, `build_funnel_stats`, `_rating_group`)
+**Данные верифицированы через браузер:**
+- Оранжевый (246290927): 110 на карточке → 55 в API → 27 за год → 8 после PRO-фильтра
+- FDM (371806956): 30 на карточке → 18 в API → 18 за год (все свежие) → ~8 после фильтра
 
 ---
 
-### v4.0 — Исправлены критические баги (15.04.2026)
+### v5.0 — TOTAL SCRAPE PRO: Playwright + PRO-воронка (16.04.2026)
 
-**БАГ #1 (КРИТИЧЕСКИЙ) — Склейка SKU** ✅ ИСПРАВЛЕН  
-- Добавлена функция `get_sku_variants()` + JS `_JS_PARSE_VARIANTS`  
-- Каждый отзыв помечается полем `sku_variant`  
-- В JSON добавлено поле `all_sku_variants`
+**Файл:** `pro_scraper_reviews.py`
 
-**БАГ #2 (КРИТИЧЕСКИЙ) — Неверный знаменатель %** ✅ ИСПРАВЛЕН  
-- Добавлена функция `build_funnel_stats()` — строит воронку:  
-  `total_wb → total_parsed → no_text → working_base`  
-- % позитив/нейтрал/негатив считаются от `working_base`, сумма = 100%  
-- Добавлен `sum_pct_check` для самопроверки
+**Проблема:** WB DDoS-Guard начал блокировать прямые API-запросы из `main.py`.
 
-**БАГ #3 (СРЕДНИЙ) — 3★ выпадала из расчёта** ✅ ИСПРАВЛЕН  
-- `_rating_group()`: 4-5★ = позитив, 3★ = нейтрал, 1-2★ = негатив  
-- Нейтрал теперь явно присутствует в CSV и JSON
+**Решение:** Playwright с браузерной сессией. Запросы делаются через `page.evaluate(fetch)` — изнутри браузера с WB-куками. DDoS-Guard видит легитимный AJAX.
 
-**Прочие улучшения v4.0:**  
-- `REVIEWS_CSV_FIELDS` расширен: добавлены `sku_variant`, `total_wb`, `total_parsed`, `no_text`, `working_base`, `positive_pct`, `neutral_pct`, `negative_pct`, `rating_group`  
-- `wait_for_challenge()` — поддержка таймаута до 5 минут для антибота WB
+**PRO-фильтр:**
+- 1-3★: проходит всегда (Rule 1)
+- 4-5★: >17 слов + отсутствие стоп-фраз (3 категории) + слова-брейкеры как исключение
+- Подробно: `FILTER_PIPELINE_EXPLAINED.txt`
+
+---
+
+### main.py v5.0 — API-режим без браузера (16.04.2026)
+
+**Три эндпоинта:**
+- `feedbacks2.wb.ru/feedbacks/v1/{root}` — отзывы
+- `questions.wb.ru/api/v1/questions?nmId=` — вопросы (DNS не резолвится!)
+- `card.wb.ru/cards/v4/detail?nm=` — инфо о товаре
 
 ---
 
@@ -100,12 +107,13 @@ API-парсер отзывов с Wildberries (без браузера).
 - [ ] 3.3: Убрать колонку «цвет/вариант» как информационную
 
 ### Приоритет 4 — QA-анализ вопросов
-- [ ] 4.1: Применить аналитический пайплайн к вопросам (1868 записей)
+- [ ] 4.1: Применить аналитический пайплайн к вопросам
 - [ ] 4.2: Смёрджить боли из вопросов и отзывов в единую Pain Matrix
 
-### Известные ограничения v5.0
-- **Q&A вопросы недоступны**: `questions.wb.ru` не резолвится DNS; `type=question` возвращает обычные отзывы. `scrape_questions()` возвращает `[]` + WARNING. TODO: endpoint `questions.wb.ru/api/v1/questions?nmId={nm}&take=30&skip=0`
-- **API-лимит 1000**: feedbacks2.wb.ru отдаёт максимум 1000 записей. Крупные товары (124436959: 1477, 428894982: 1978, 844748724: 2317) берём только первые 1000 (самые новые).
+### Известные ограничения
+- **Немые оценки:** WB не возвращает оценки без текста через API (246290927: 55 из 110)
+- **API-лимит 1000:** feedbacks2.wb.ru отдаёт максимум 1000 записей
+- **Q&A вопросы:** questions.wb.ru не резолвится DNS; scrape_questions() возвращает []
 
 ---
 
@@ -115,27 +123,30 @@ API-парсер отзывов с Wildberries (без браузера).
 # Логирование — всегда с section-тегом
 log.info(f"  [section] message {var!r}")
 
-# Функции возвращают dict
-def get_something() -> dict:
-    return {"key": "", "other": []}
+# Воронка данных — всегда text_base как знаменатель
+pct = round(n / text_base * 100, 1) if text_base > 0 else 0.0
 
-# Stealth-задержки
-rand_sleep(*DELAY_BETWEEN_PAGES)   # распаковка кортежа
+# PRO-фильтр — негатив всегда проходит
+if rating <= 3:
+    return True
 
-# Воронка данных — всегда working_base как знаменатель
-pct = round(n / working_base * 100, 1) if working_base > 0 else 0.0
+# Дедупликация по root
+if root in root_cache:
+    all_norm, total_wb_root = root_cache[root]
+else:
+    raw_api, total_wb_root = fetch_all_reviews(page, root, cutoff, nm_id)
+    root_cache[root] = (all_norm, total_wb_root)
 
-# Комментарии объясняют ПОЧЕМУ
-# БАГ #1 FIX: помечаем каждый отзыв тем вариантом SKU, который парсили
-for item in batch:
-    item["sku_variant"] = sku_variant
+# SKU de-gluing — nmId надёжнее color
+nm_id = fb.get("nmId") or 0   # никогда не пустой
+# card.wb.ru → colors[0].name = display_name варианта
 ```
 
 ---
 
-## Данные в results/
+## Тестовые данные (gitignored)
 
-- **9 артикулов** в подпапках: `124436959`, `196861890`, `224227461`, `227044607`, `246290927`, `333681986`, `428894982`, `480055076`, `480055077`
-- Каждая подпапка: `reviews.json`, `questions.json`, `full.json`, `reviews.txt`, `questions.txt`, `reviews.csv`, `questions.csv`
-- **Важно**: данные в `results/` собраны ДО v4.0 — в них отсутствуют поля `funnel_stats`, `sku_variant`, `rating_group`
-- Артикулы `480055076` и `480055077` имеют одинаковый размер файла — подтверждение бага #1 (склейка)
+- `results_test/` — результаты ДО исправлений v5.1 (старый total_wb=151)
+- `results_test_v2/` — результаты ПОСЛЕ исправлений v5.1 (правильный total_wb_nm=110)
+- `results_test_v3/` — промежуточные тесты де-глуинга
+- `articles_test.txt` — тестовый набор: артикулы 246290927 (Оранжевый) и 371806956 (FDM)
