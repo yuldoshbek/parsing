@@ -32,11 +32,12 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright, Page, BrowserContext
 
 try:
-    from playwright_stealth import stealth_sync
+    from playwright_stealth import Stealth as _Stealth
+    _stealth_instance = _Stealth()
     HAS_STEALTH = True
 except ImportError:
     HAS_STEALTH = False
-    # Будет использован встроенный JS-патч (см. _STEALTH_JS ниже)
+    _stealth_instance = None
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -254,12 +255,12 @@ Object.defineProperty(navigator, 'appVersion', {
 
 
 def apply_stealth(page: Page) -> None:
-    if HAS_STEALTH:
-        stealth_sync(page)
-        log.debug("  [stealth] playwright-stealth применён")
+    if HAS_STEALTH and _stealth_instance is not None:
+        _stealth_instance.apply_stealth_sync(page)
+        log.debug("  [stealth] playwright-stealth v2 применён")
     else:
         page.add_init_script(_STEALTH_JS)
-        log.debug("  [stealth] JS-патч применён (playwright-stealth не установлен)")
+        log.debug("  [stealth] JS-патч применён")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -319,22 +320,41 @@ def safe_goto(page: Page, url: str, timeout: int = 60_000) -> bool:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  ИНФО О ТОВАРЕ
+#  ИНФО О ТОВАРЕ — через page.evaluate (fetch изнутри браузера)
 # ══════════════════════════════════════════════════════════════════════════════
-def get_product_info(context: BrowserContext, nm_id: int) -> dict:
+def get_product_info(page: Page, nm_id: int) -> dict:
     """
-    Запрашивает brand, name, total_wb, root (imtId) через браузерную сессию.
-    root (imtId) — ID склейки, нужен для feedbacks2.wb.ru API.
+    Запрашивает brand, name, total_wb, root (imtId).
+    Использует page.evaluate(fetch) — запрос идёт ИЗНУТРИ браузера,
+    с его cookies и origin. Это не блокируется card.wb.ru.
     """
     url = (
         f"https://card.wb.ru/cards/v4/detail"
         f"?appType=1&curr=rub&dest=-1257786&nm={nm_id}"
     )
     try:
-        resp = context.request.get(url, timeout=20_000)
-        data = resp.json()
+        data = page.evaluate("""
+            async (url) => {
+                try {
+                    const r = await fetch(url, {
+                        headers: {
+                            'Accept': 'application/json, text/plain, */*',
+                            'Accept-Language': 'ru-RU,ru;q=0.9',
+                        }
+                    });
+                    if (!r.ok) return {_error: r.status};
+                    return await r.json();
+                } catch(e) {
+                    return {_error: String(e)};
+                }
+            }
+        """, url)
     except Exception as e:
-        log.error(f"  [product_info] ошибка: {e!r}")
+        log.error(f"  [product_info] ошибка evaluate: {e!r}")
+        return {"brand": "", "name": "", "total_wb": 0, "root": nm_id}
+
+    if not data or data.get("_error"):
+        log.error(f"  [product_info] ошибка: {data}")
         return {"brand": "", "name": "", "total_wb": 0, "root": nm_id}
 
     products = (
@@ -354,21 +374,16 @@ def get_product_info(context: BrowserContext, nm_id: int) -> dict:
 # ══════════════════════════════════════════════════════════════════════════════
 #  СБОР ОТЗЫВОВ — ПАГИНАЦИЯ ЗА 365 ДНЕЙ
 # ══════════════════════════════════════════════════════════════════════════════
-def fetch_all_reviews(context: BrowserContext, root: int,
+def fetch_all_reviews(page: Page, root: int,
                       cutoff: datetime, nm_id: int) -> tuple[list[dict], int]:
     """
-    Загружает все отзывы за последние DAYS_BACK дней через браузерную сессию.
+    Загружает все отзывы за DAYS_BACK дней через page.evaluate(fetch).
 
-    Механизм:
-      context.request.get() использует cookies + headers браузера →
-      запрос выглядит как легитимный AJAX от страницы WB.
+    page.evaluate() делает fetch() ИЗНУТРИ браузера — с его cookies,
+    origin и referer. feedbacks2.wb.ru видит легитимный запрос от страницы WB.
 
-    Пагинация:
-      skip увеличивается на размер батча, стоп — когда дата отзыва старше cutoff.
-
-    Возвращает: (сырые отзывы из API, feedbackCount полный счётчик WB).
+    Пагинация через skip/take до тех пор пока не встретим отзывы старше cutoff.
     """
-    url = f"https://feedbacks2.wb.ru/feedbacks/v1/{root}"
     all_raw: list[dict] = []
     skip = 0
     total_wb = 0
@@ -376,22 +391,34 @@ def fetch_all_reviews(context: BrowserContext, root: int,
 
     while not stop_flag:
         try:
-            resp = context.request.get(
-                url,
-                params={"take": TAKE_PER_REQ, "skip": skip, "order": "dateDesc"},
-                headers={
-                    "Referer":    f"https://www.wildberries.ru/catalog/{nm_id}/feedbacks",
-                    "Origin":     "https://www.wildberries.ru",
-                    "sec-fetch-site": "cross-site",
-                },
-                timeout=30_000,
-            )
-            if resp.status != 200:
-                log.warning(f"  [feedbacks] HTTP {resp.status} на skip={skip} — стоп")
-                break
-            data = resp.json()
+            data = page.evaluate("""
+                async ({root, skip, take}) => {
+                    try {
+                        const url = `https://feedbacks2.wb.ru/feedbacks/v1/${root}`;
+                        const params = new URLSearchParams({
+                            take: String(take), skip: String(skip), order: 'dateDesc'
+                        });
+                        const r = await fetch(`${url}?${params}`, {
+                            headers: {
+                                'Accept': 'application/json, text/plain, */*',
+                                'Accept-Language': 'ru-RU,ru;q=0.9',
+                                'Origin': 'https://www.wildberries.ru',
+                                'Referer': 'https://www.wildberries.ru/',
+                            }
+                        });
+                        if (!r.ok) return {_error: r.status, feedbacks: []};
+                        return await r.json();
+                    } catch(e) {
+                        return {_error: String(e), feedbacks: []};
+                    }
+                }
+            """, {"root": root, "skip": skip, "take": TAKE_PER_REQ})
         except Exception as e:
-            log.error(f"  [feedbacks] ошибка на skip={skip}: {e!r}")
+            log.error(f"  [feedbacks] ошибка evaluate на skip={skip}: {e!r}")
+            break
+
+        if not data or data.get("_error"):
+            log.warning(f"  [feedbacks] ошибка API на skip={skip}: {data}")
             break
 
         batch = data.get("feedbacks") or []
@@ -411,11 +438,11 @@ def fetch_all_reviews(context: BrowserContext, root: int,
             all_raw.append(fb)
             kept += 1
 
-        oldest = fmt_date(batch[-1].get("createdDate", ""))
+        oldest = fmt_date(batch[-1].get("createdDate", "")) if batch else "?"
         log.info(f"  [feedbacks] skip={skip} | batch={len(batch)} | kept={kept} | oldest={oldest}")
 
         if len(batch) < TAKE_PER_REQ:
-            log.info("  [feedbacks] последняя страница API")
+            log.info("  [feedbacks] последняя страница")
             break
 
         skip += len(batch)
@@ -469,7 +496,9 @@ def build_funnel_stats(raw: list[dict], filtered: list[dict], total_wb: int) -> 
     working_base = total_parsed - no_text   # с текстом, до воронки
     after_filter = len(filtered)            # прошло PRO-воронку
 
+    # Знаменатель — только отзывы с текстом, прошедшие воронку
     text_filt = [r for r in filtered if r.get("has_text", False)]
+    text_base = len(text_filt)
     positive  = sum(1 for r in text_filt if r.get("rating", 0) >= 4)
     neutral   = sum(1 for r in text_filt if r.get("rating", 0) == 3)
     negative  = sum(1 for r in text_filt if r.get("rating", 0) in (1, 2))
@@ -484,16 +513,17 @@ def build_funnel_stats(raw: list[dict], filtered: list[dict], total_wb: int) -> 
             "no_text":         no_text,
             "working_base":    working_base,
             "after_filter":    after_filter,
+            "text_base":       text_base,       # знаменатель для % (с текстом, после воронки)
             "filter_rate_pct": round((1 - after_filter / working_base) * 100, 1) if working_base else 0.0,
         },
         "sentiment": {
             "positive_count": positive,
             "neutral_count":  neutral,
             "negative_count": negative,
-            "positive_pct":   pct(positive, after_filter),
-            "neutral_pct":    pct(neutral,  after_filter),
-            "negative_pct":   pct(negative, after_filter),
-            "sum_pct_check":  round(pct(positive, after_filter) + pct(neutral, after_filter) + pct(negative, after_filter), 1),
+            "positive_pct":   pct(positive, text_base),
+            "neutral_pct":    pct(neutral,  text_base),
+            "negative_pct":   pct(negative, text_base),
+            "sum_pct_check":  round(pct(positive, text_base) + pct(neutral, text_base) + pct(negative, text_base), 1),
         },
         "_note": (
             "working_base = отзывы с текстом до воронки. "
@@ -525,7 +555,7 @@ def to_txt_llm(product_id: str, brand: str, name: str, sku: str,
         f"  Рабочая база:     {f.get('working_base', 0)}",
         f"  После PRO-фильтра:{f.get('after_filter', 0)}  (отсеяно {f.get('filter_rate_pct', 0)}%)",
         "",
-        f"── СЕНТИМЕНТ (% от {f.get('after_filter', 0)} отзывов) ──────────────────────────",
+        f"── СЕНТИМЕНТ (% от {f.get('text_base', 0)} отзывов с текстом) ─────────────────────",
         f"  Позитив (4-5★): {s.get('positive_count', 0)} отз.  = {s.get('positive_pct', 0)}%",
         f"  Нейтрал  (3★):  {s.get('neutral_count',  0)} отз.  = {s.get('neutral_pct',  0)}%",
         f"  Негатив (1-2★): {s.get('negative_count', 0)} отз.  = {s.get('negative_pct', 0)}%",
@@ -557,7 +587,7 @@ def to_txt_llm(product_id: str, brand: str, name: str, sku: str,
 # ══════════════════════════════════════════════════════════════════════════════
 CSV_FIELDS = [
     "product_id", "brand", "name", "sku_variant",
-    "total_wb", "total_parsed", "no_text", "working_base", "after_filter",
+    "total_wb", "total_parsed", "no_text", "working_base", "after_filter", "text_base",
     "positive_pct", "neutral_pct", "negative_pct", "sum_pct_check",
     "date", "rating", "rating_group", "word_count",
     "pros", "cons", "text", "seller_answer",
@@ -585,6 +615,7 @@ def reviews_to_csv_rows(product_id: str, brand: str, name: str,
             "no_text":       f.get("no_text", ""),
             "working_base":  f.get("working_base", ""),
             "after_filter":  f.get("after_filter", ""),
+            "text_base":     f.get("text_base", ""),
             "positive_pct":  s.get("positive_pct", ""),
             "neutral_pct":   s.get("neutral_pct", ""),
             "negative_pct":  s.get("negative_pct", ""),
@@ -728,21 +759,21 @@ def main() -> None:
                 log.info(f"  ☕ Cooldown {dur:.0f}с...")
                 time.sleep(dur)
 
-            # ── Инфо о товаре ─────────────────────────────────────────────
-            info = get_product_info(context, nm_id)
-            root = info["root"]
-            log.info(f"  Товар: {info['brand']!r} — {info['name']!r}")
-            log.info(f"  nmId={nm_id}, root={root}, total_wb={info['total_wb']}")
-
-            # ── Навигация на страницу отзывов (контекст WB для API) ───────
+            # ── Навигация на страницу отзывов (устанавливает сессию WB) ──
             reviews_url = f"https://www.wildberries.ru/catalog/{nm_id}/feedbacks"
             if not safe_goto(page, reviews_url):
                 log.warning(f"  Пропускаем {nm_id} — страница не прошла проверку")
                 continue
             rand_sleep(*DELAY_PAGE)
 
+            # ── Инфо о товаре — через page.evaluate (после загрузки страницы)
+            info = get_product_info(page, nm_id)
+            root = info["root"]
+            log.info(f"  Товар: {info['brand']!r} — {info['name']!r}")
+            log.info(f"  nmId={nm_id}, root={root}, total_wb={info['total_wb']}")
+
             # ── Сбор отзывов с пагинацией ─────────────────────────────────
-            raw_api, api_total_wb = fetch_all_reviews(context, root, cutoff, nm_id)
+            raw_api, api_total_wb = fetch_all_reviews(page, root, cutoff, nm_id)
             total_wb = api_total_wb or info["total_wb"]
             log.info(f"  Сырых за {DAYS_BACK} дней: {len(raw_api)}")
 
@@ -762,7 +793,10 @@ def main() -> None:
             # ── SKU De-gluing: разбивка по цвету/варианту ─────────────────
             sku_map: dict[str, list[dict]] = {}
             for r in filtered:
-                sku = r.get("sku_variant") or "Неизвестно"
+                raw_sku = (r.get("sku_variant") or "").strip()
+                # Нормализуем регистр: первая буква заглавная, остальные как есть
+                sku = raw_sku.capitalize() if raw_sku else "Неизвестно"
+                r["sku_variant"] = sku  # обновляем и в самом отзыве
                 sku_map.setdefault(sku, []).append(r)
             all_skus = sorted(sku_map.keys())
             log.info(f"  SKU-варианты ({len(all_skus)}): {all_skus}")

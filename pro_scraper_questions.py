@@ -31,10 +31,12 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright, Page, BrowserContext
 
 try:
-    from playwright_stealth import stealth_sync
+    from playwright_stealth import Stealth as _Stealth
+    _stealth_instance = _Stealth()
     HAS_STEALTH = True
 except ImportError:
     HAS_STEALTH = False
+    _stealth_instance = None
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -116,8 +118,8 @@ def safe_filename(name: str) -> str:
 #  STEALTH
 # ══════════════════════════════════════════════════════════════════════════════
 def apply_stealth(page: Page) -> None:
-    if HAS_STEALTH:
-        stealth_sync(page)
+    if HAS_STEALTH and _stealth_instance is not None:
+        _stealth_instance.apply_stealth_sync(page)
     else:
         page.add_init_script(_STEALTH_JS)
 
