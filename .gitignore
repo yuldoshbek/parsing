@@ -1,0 +1,56 @@
+# ── Данные (не хранятся в репозитории) ──────────────────────────────────────
+results/
+*.csv
+data_export.json
+data_export.txt
+
+# ── Входные файлы (создай свой articles.txt по образцу articles.example.txt) ─
+articles.txt
+
+# ── Логи ─────────────────────────────────────────────────────────────────────
+run_log.txt
+run_out.txt
+run_err.txt
+debug_*.txt
+debug_err.txt
+debug_out.txt
+
+# ── Браузерный профиль (остаток от Playwright v4) ────────────────────────────
+chrome_profile/
+
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+venv/
+env/
+.venv/
+.env/
+pip-wheel-metadata/
+
+# ── Claude Code internal files ────────────────────────────────────────────────
+.claude/
+
+# ── IDE / OS ──────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Справочные/рабочие файлы (транскрипции, таблицы) ─────────────────────────
+*.xlsx
+2026-*.txt
+
+# ── Прочее ────────────────────────────────────────────────────────────────────
+*.bak
+*.tmp
