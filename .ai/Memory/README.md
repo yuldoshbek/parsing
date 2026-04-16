@@ -1,7 +1,7 @@
 # AI Memory — Парсер отзывов WB
 
 > Последнее обновление: 16 апреля 2026  
-> Версия парсера: v4.0  
+> Версия парсера: v5.0  
 > Агент: Claude Sonnet 4.6
 
 ---
@@ -9,19 +9,32 @@
 ## Состояние проекта
 
 ### Что это
-Playwright-парсер отзывов и вопросов с Wildberries.  
-Запуск: `python main.py` (читает `articles.txt`, пишет в `results/{nmId}/`)
+API-парсер отзывов с Wildberries (без браузера).  
+Запуск: `python main.py` (читает `articles.txt`, пишет в `results/` или `$WB_RESULTS_DIR`)
 
-### Файлы проекта
-| Файл | Роль |
+### GitHub
+Репозиторий: https://github.com/yuldoshbek/parsing  
+Ветка: `main`. Задеплоен 16.04.2026.
+
+### Структура проекта
+| Файл/папка | Роль |
 |---|---|
-| `main.py` | Основной парсер v4.0 — stealth Playwright + сбор отзывов/вопросов |
-| `convert.py` | Разовый конвертер старых `results/*.json` в новый формат подпапок |
-| `debug_check.py` | Диагностический скрипт — проверяет видимость отзывов на странице |
-| `requirements.txt` | `playwright>=1.44.0`, `requests>=2.31.0` |
-| `articles.txt` | Список артикулов WB (по одному на строку) |
-| `implementation_plan.md` | Аудит багов + приоритизированный план исправлений |
-| `ИНСТРУКЦИЯ_ДЛЯ_ИИ_АНАЛИТИКА.md` | ТЗ для ИИ-аналитика — формат анализа отзывов |
+| `main.py` | Основной парсер v5.0 — API-режим (requests, без браузера) |
+| `requirements.txt` | `requests>=2.31.0` |
+| `articles.txt` | Список артикулов WB (gitignored — создай свой) |
+| `articles.example.txt` | Пример формата articles.txt |
+| `run.bat` | Windows-запуск с логом |
+| `README.md` | Полная документация для разработчиков и ИИ |
+| `docs/AI_ANALYST_GUIDE.md` | ТЗ для ИИ-аналитика — формат анализа отзывов |
+| `docs/AUDIT_AND_PLAN.md` | Аудит багов v1-v4 + приоритизированный план |
+| `tools/convert.py` | Разовый конвертер старых `results/*.json` → новый формат |
+| `tools/debug_check.py` | Диагностика API-ответов |
+| `results/` | Директория вывода (gitignored, задаётся через `WB_RESULTS_DIR`) |
+
+### Разделение кода и данных
+Код в `C:\Users\User\Desktop\Отзывы\`.  
+Данные (`results/`) — там же по умолчанию, но можно вынести через `WB_RESULTS_DIR`.  
+В репозиторий данные **не коммитятся** (gitignored).
 
 ---
 

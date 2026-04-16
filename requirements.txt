@@ -1,2 +1,9 @@
+# TOTAL SCRAPE PRO v5 — зависимости
+# Установка: pip install -r requirements.txt
+
+playwright>=1.44.0
+playwright-stealth>=1.0.6
 requests>=2.31.0
-# playwright>=1.44.0  # не нужен с v5.0 (API-режим, браузер не используется)
+
+# После установки выполни:
+#   playwright install chromium
