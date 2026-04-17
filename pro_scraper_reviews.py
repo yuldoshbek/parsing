@@ -548,7 +548,10 @@ def build_funnel_stats(raw: list[dict], filtered: list[dict],
             "working_base":    working_base,
             "after_filter":    after_filter,
             "text_base":       text_base,       # знаменатель для % (с текстом, после воронки)
-            "filter_rate_pct": round((1 - after_filter / working_base) * 100, 1) if working_base else 0.0,
+            # filter_rate_pct: % текстовых отзывов, отсеянных PRO-воронкой
+            # Считаем от working_base (текстовые до воронки) к text_base (текстовые после)
+            # after_filter включает no-text 1-3★ (Rule 1), поэтому нельзя делить на working_base
+            "filter_rate_pct": round((1 - text_base / working_base) * 100, 1) if working_base else 0.0,
         },
         "sentiment": {
             "positive_count": positive,
