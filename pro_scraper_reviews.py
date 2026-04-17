@@ -473,6 +473,14 @@ def fetch_all_reviews(page: Page, root: int,
             break
 
         skip += len(batch)
+
+        # Защита от бесконечного цикла: feedbacks2.wb.ru у крупных товаров
+        # игнорирует skip и всегда возвращает одни и те же свежие отзывы.
+        # Если запросили больше, чем всего существует — останавливаемся.
+        if total_wb > 0 and skip >= total_wb:
+            log.info(f"  [feedbacks] skip={skip} >= total_wb={total_wb} — стоп (API не поддерживает глубокую пагинацию)")
+            break
+
         rand_sleep(0.8, 2.0)
 
     return all_raw, total_wb
