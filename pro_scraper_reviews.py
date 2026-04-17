@@ -123,8 +123,18 @@ def pro_filter(review: dict) -> bool:
     False = мусор.
 
     ПРАВИЛО 1 — 100% негатива (1-3★) проходит всегда.
-    ПРАВИЛО 2 — Позитив (4-5★): строго > 17 слов И нет стоп-фраз.
-                Исключение: есть слова-брейкеры → сохраняем несмотря на стоп-фразы.
+
+    ПРАВИЛО 2 — Позитив (4-5★), удаляем ТОЛЬКО если ОДНОВРЕМЕННО:
+        - длина < 17 слов
+        - есть стоп-фраза
+        - нет слов-брейкеров
+
+    Во всех остальных случаях — сохраняем.
+    Иными словами:
+        длина >= 17 слов            → СОХРАНИТЬ
+        нет стоп-фразы              → СОХРАНИТЬ
+        есть брейкер                → СОХРАНИТЬ
+        короткий + стоп + нет брейкера → УДАЛИТЬ
     """
     rating = review.get("rating", 0)
 
@@ -132,28 +142,29 @@ def pro_filter(review: dict) -> bool:
     if rating <= 3:
         return True
 
-    # ПРАВИЛО 2: позитив — двойной барьер
+    # ПРАВИЛО 2: позитив
     full_text = " ".join(filter(None, [
         review.get("pros", ""),
         review.get("cons", ""),
         review.get("text", ""),
     ])).lower()
 
-    # Барьер длины
-    if len(full_text.split()) <= MIN_WORDS_POSITIVE:
-        return False
+    # Длинный отзыв → сразу сохраняем, без проверки стоп-фраз
+    if len(full_text.split()) >= MIN_WORDS_POSITIVE:
+        return True
 
-    # Проверка стоп-фраз
+    # Короткий, но без стоп-фразы → тоже сохраняем
     has_stop = any(phrase in full_text for phrase in ALL_STOP_PHRASES)
     if not has_stop:
         return True
 
-    # Исключение: слова-брейкеры отменяют стоп-фразы
+    # Короткий + стоп-фраза, но есть брейкер → сохраняем
     return any(word in full_text for word in BREAK_WORDS)
+    # Короткий + стоп-фраза + нет брейкера → return False (неявно)
 
 
 def filter_reason(review: dict) -> str:
-    """Возвращает причину отсева (для диагностики)."""
+    """Возвращает причину отсева (для диагностики). Пустая строка = отзыв прошёл."""
     rating = review.get("rating", 0)
     if rating <= 3:
         return ""
@@ -161,13 +172,18 @@ def filter_reason(review: dict) -> str:
         review.get("pros", ""), review.get("cons", ""), review.get("text", ""),
     ])).lower()
     wc = len(full_text.split())
-    if wc <= MIN_WORDS_POSITIVE:
-        return f"short ({wc} words)"
-    for phrase in ALL_STOP_PHRASES:
-        if phrase in full_text:
-            if not any(b in full_text for b in BREAK_WORDS):
-                return f"stop_phrase: '{phrase}'"
-    return ""
+    # Проходит: длинный
+    if wc >= MIN_WORDS_POSITIVE:
+        return ""
+    # Проходит: короткий, но без стоп-фразы
+    hit_phrase = next((p for p in ALL_STOP_PHRASES if p in full_text), None)
+    if hit_phrase is None:
+        return ""
+    # Проходит: короткий + стоп + но есть брейкер
+    if any(b in full_text for b in BREAK_WORDS):
+        return ""
+    # Удаляем: короткий + стоп + нет брейкера
+    return f"short({wc}w) + stop_phrase: '{hit_phrase}'"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
